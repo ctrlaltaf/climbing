@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Climbing To-Dos</title>
+<style>
+:root {
+  --bg: #fafafa;
+  --fg: #1a1a1a;
+  --muted: #6b6b6b;
+  --border: #e3e3e3;
+  --row-hover: #f0f0f0;
+  --accent: #b85c00;
+  --error-bg: rgba(184, 92, 0, 0.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a;
+    --fg: #ececec;
+    --muted: #9aa0a6;
+    --border: #2c3036;
+    --row-hover: #1c2024;
+    --accent: #ffa657;
+    --error-bg: rgba(255, 166, 87, 0.1);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+.wrap { max-width: 980px; margin: 0 auto; padding: 28px 16px 60px; }
+h1 { margin: 0 0 4px; font-size: 1.7rem; }
+.sub { color: var(--muted); margin: 0 0 24px; font-size: 0.95rem; }
+.sub a { color: var(--muted); text-decoration: underline; }
+.controls {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px;
+}
+.controls label { font-size: 0.9rem; color: var(--muted); }
+.controls select {
+  padding: 6px 28px 6px 10px; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px; font: inherit;
+}
+.count { margin-left: auto; color: var(--muted); font-size: 0.9rem; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+thead th {
+  position: sticky; top: 0; background: var(--bg);
+  text-align: left; font-weight: 600; border-bottom: 1px solid var(--border);
+  padding: 10px 12px; cursor: pointer; user-select: none; white-space: nowrap;
+}
+thead th:hover { color: var(--accent); }
+thead th .arrow { color: var(--muted); margin-left: 4px; font-size: 0.8em; }
+tbody td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--row-hover); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.stars { white-space: nowrap; }
+.stars .num { color: var(--muted); margin-left: 6px; font-size: 0.85em; }
+.error {
+  padding: 16px; background: var(--error-bg);
+  border: 1px solid var(--accent); border-radius: 8px;
+}
+.loading { color: var(--muted); padding: 8px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Climbing To-Dos</h1>
+  <p class="sub">Boulder problems on the tick list. Source: <a href="to-dos.csv">to-dos.csv</a>.</p>
+  <div class="controls">
+    <label for="crag-filter">Crag</label>
+    <select id="crag-filter"><option value="">All</option></select>
+    <span class="count" id="count"></span>
+  </div>
+  <div id="content"><div class="loading">Loading climbs&hellip;</div></div>
+</div>
+<script>
+const COLUMNS = [
+  { key: 'route',    label: 'Route',    sort: (a, b) => a.route.localeCompare(b.route) },
+  { key: 'grade',    label: 'Grade',    sort: (a, b) => a.gradeCode - b.gradeCode },
+  { key: 'stars',    label: 'Stars',    sort: (a, b) => a.stars - b.stars,
+                     render: r => starsHtml(r.stars) },
+  { key: 'crag',     label: 'Crag',     sort: (a, b) => a.crag.localeCompare(b.crag) },
+  { key: 'subarea',  label: 'Sub-area', sort: (a, b) => a.subarea.localeCompare(b.subarea) },
+  { key: 'length',   label: 'Length',   sort: (a, b) => a.length - b.length,
+                     render: r => r.length ? r.length + ' ft' : '' },
+];
+
+let rows = [];
+let sortIndex = 2;   // stars
+let sortDir = -1;    // descending → best-rated first
+let filterCrag = '';
+
+function parseCSV(text) {
+  const out = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i + 1] === '\n') i++;
+        row.push(field); field = '';
+        if (row.length > 1 || row[0] !== '') out.push(row);
+        row = [];
+      } else field += c;
+    }
+  }
+  if (field !== '' || row.length > 0) {
+    row.push(field);
+    if (row.length > 1 || row[0] !== '') out.push(row);
+  }
+  return out;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+  ));
+}
+
+function starsHtml(n) {
+  const r = Math.max(0, Math.min(4, Math.round(n)));
+  const filled = '★'.repeat(r);
+  const empty = '☆'.repeat(4 - r);
+  return `<span class="stars">${filled}${empty}<span class="num">${n.toFixed(1)}</span></span>`;
+}
+
+function deriveAreas(location) {
+  const parts = location.split(' > ').map(s => s.trim()).filter(Boolean);
+  return {
+    crag:    parts[2] || parts[parts.length - 1] || '',
+    subarea: parts[parts.length - 1] || '',
+  };
+}
+
+function buildRows(csvRows) {
+  if (!csvRows.length) return [];
+  const header = csvRows[0];
+  const col = name => header.indexOf(name);
+  const iRoute = col('Route'), iRating = col('Rating'), iURL = col('URL'),
+        iLoc = col('Location'), iStars = col('Avg Stars'),
+        iLen = col('Length'), iCode = col('Rating Code');
+  return csvRows.slice(1).map(r => {
+    const areas = deriveAreas(r[iLoc] || '');
+    return {
+      route:     r[iRoute] || '',
+      grade:     r[iRating] || '',
+      gradeCode: parseInt(r[iCode], 10) || 0,
+      url:       r[iURL] || '',
+      stars:     parseFloat(r[iStars]) || 0,
+      crag:      areas.crag,
+      subarea:   areas.subarea,
+      length:    parseInt(r[iLen], 10) || 0,
+    };
+  });
+}
+
+function populateFilter() {
+  const select = document.getElementById('crag-filter');
+  const crags = Array.from(new Set(rows.map(r => r.crag).filter(Boolean))).sort();
+  for (const c of crags) {
+    const opt = document.createElement('option');
+    opt.value = c;
+    opt.textContent = c;
+    select.appendChild(opt);
+  }
+  select.addEventListener('change', () => { filterCrag = select.value; render(); });
+}
+
+function cellHtml(col, r) {
+  if (col.key === 'route') {
+    return r.url
+      ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.route)}</a>`
+      : esc(r.route);
+  }
+  if (col.render) return col.render(r);
+  return esc(r[col.key] || '');
+}
+
+function render() {
+  const visible = filterCrag ? rows.filter(r => r.crag === filterCrag) : rows.slice();
+  const col = COLUMNS[sortIndex];
+  visible.sort((a, b) => sortDir * col.sort(a, b));
+
+  const headHtml = COLUMNS.map((c, i) => {
+    const arrow = i === sortIndex ? (sortDir === 1 ? '↑' : '↓') : '';
+    return `<th data-i="${i}">${esc(c.label)}<span class="arrow">${arrow}</span></th>`;
+  }).join('');
+
+  const bodyHtml = visible.map(r =>
+    '<tr>' + COLUMNS.map(c => `<td>${cellHtml(c, r)}</td>`).join('') + '</tr>'
+  ).join('');
+
+  document.getElementById('content').innerHTML =
+    `<div class="table-wrap"><table>
+       <thead><tr>${headHtml}</tr></thead>
+       <tbody>${bodyHtml}</tbody>
+     </table></div>`;
+
+  document.getElementById('count').textContent =
+    visible.length === rows.length
+      ? `${rows.length} climbs`
+      : `${visible.length} of ${rows.length} climbs`;
+
+  document.querySelectorAll('thead th').forEach(th => {
+    th.addEventListener('click', () => {
+      const i = parseInt(th.dataset.i, 10);
+      if (i === sortIndex) sortDir = -sortDir;
+      else { sortIndex = i; sortDir = 1; }
+      render();
+    });
+  });
+}
+
+function showError(msg) {
+  document.getElementById('content').innerHTML = `<div class="error">${esc(msg)}</div>`;
+}
+
+fetch('to-dos.csv')
+  .then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status} fetching to-dos.csv`);
+    return r.text();
+  })
+  .then(text => {
+    rows = buildRows(parseCSV(text));
+    populateFilter();
+    render();
+  })
+  .catch(err => {
+    showError(
+      `Could not load climbs: ${err.message}. ` +
+      `If you opened this file directly (file://), serve it through a local web server instead — ` +
+      `e.g. run "python3 -m http.server 8000" in this folder and visit http://localhost:8000/.`
+    );
+  });
+</script>
+</body>
+</html>
